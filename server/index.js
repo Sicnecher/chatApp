@@ -1,94 +1,108 @@
+//All required NPM packages
 const express = require('express');
 const bodyParser = require('body-parser');
+const http = require('http');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
-
-require('dotenv').config();
+const { Server } = require('socket.io');
+const path = require('path');
 const cookieParser = require('cookie-parser');
 
 
-const connectDB = mongoose.connect('mongodb://127.0.0.1:27017/WhatApp');
+//MongoDB/WhatApp connection and Collections
+mongoose.connect('mongodb://127.0.0.1:27017/WhatApp');
 
-const messageSchema = new mongoose.Schema({
-    input:String,
-    date: Date,
-    from:String
-  })
-
-const archiveSchema = new mongoose.Schema({
-      userName: String,
-      _id: mongoose.Schema.Types.ObjectId,
-    messages: [messageSchema]
-  });
-
-  const chatsSchema = new mongoose.Schema({
-    owner:String,
-    chats:[archiveSchema]
-  })
-
-
-const userSchema = new mongoose.Schema({
-    userName:{
-        type:String,
-        required:true,
-        unique:true
-    },
-    password:{
-        type:String,
-        required:true,
-    },
-            email:{
-                type:String,
-                required:true
-            },
-            adress:{
-                country:{
-                    type:String,
-                    reqiored:true
-                },
-                city:{
-                    type:String,
-                    require:true
-                },
-                street:{
-                    type:String,
-                    required:true
-                },
-                zip_code:{
-                    type:Number,
-                    required:true,
-                }
-            }
-            });
-
-        const USER = new mongoose.model('USER', userSchema);
-        const CHATS = new mongoose.model('CHATS', chatsSchema);
-
-
+const CHATS = require('./dbModels/Chats')
+const USER = require('./dbModels/User')
+const clientNote = require('./dbModels/client.contact')
 
 const app = express()
 
 
+//Required middleware
 app.use(
     bodyParser.json(),
     bodyParser.urlencoded({ extended: false }),
     express.static('client/build'),
     cors(),
+    cookieParser(),
 );
 
-app.use(cookieParser());
+
+//Socket.io server for real time chat comunication
+const server = http.createServer(app)
+
+const io = new Server(server, {
+    transport:['polling'],
+    cors:{
+        origin:'*'
+    }
+});
 
 
-const path = require('path');
+  io.on('connection', (socket) => {
+    console.log(`User ${socket.id} has connected!`);
+
+    socket.on('join-room', (data) => {
+        console.log(`user ${socket.id} has joined room ${data}`)
+        socket.join(data)
+    });
+  
+    socket.on('sendMessage', async (data) => {
+
+        //Locate the correct contact to send the message via MongoDB
+      const { from, to, input, room} = data;
+      const contactChats = await CHATS.findOne({owner:to})
+    const userChats = await CHATS.findOne({owner:from});
+
+    const message = {
+        input:input,
+        date: new Date(Date.now()).getHours() + ':' + new Date(Date.now()).getMinutes(),
+        from:from
+    }
+
+    const hasContact = contactChats.chats.some(chat => chat.userName === userChats.owner)
+
+    if(!hasContact){
+        const newChat = {
+            userName:userChats.owner,
+            _id:userChats._id,
+            room:room,
+            image:userChats.image,
+        messages:[]
+    }
+
+        await contactChats.chats.push(newChat)
+        await contactChats.save()
+    }
+
+    const userChatIndex = locateContact(userChats.chats, contactChats.owner);
+    const contactChatIndex = locateContact(contactChats.chats, userChats.owner);
+
+    await contactChats.chats[contactChatIndex].messages.push(message);
+    await userChats.chats[userChatIndex].messages.push(message);
+    await contactChats.save();
+    await userChats.save();
+
+
+      io.to(room).emit('receiveMessage', userChats.chats[userChatIndex].messages);
+  })
+
+  socket.on('disconnect', () => {
+    console.log(`user ${socket.id} has disconnected`)
+  })
+});
+
 
 function locateContact(chats, chatToFind){
+
     for(let i = 0; i<chats.length; i++){
         if(chats[i].userName == chatToFind){
             return i
         }
     }
-}
+};
 
 
 app.get('/api/user', (req, res) => {
@@ -112,7 +126,6 @@ app.get('/api/getChats', async (req, res) => {
         const user = req.cookies.user
         if(user){
         const chat = await CHATS.findOne({owner:user.userName});
-        console.log(chat)
         res.send(chat)
         }else{
         res.send(null)
@@ -121,48 +134,6 @@ app.get('/api/getChats', async (req, res) => {
         console.log(err.message)
     }
 });
-
-
-
-app.post('/api/submitMessage', async (req, res) => {
-    const referer = req.get('Referer');
-
-    const contactChats = await CHATS.findOne({owner:req.query.name})
-    const userChats = await CHATS.findOne({owner:req.cookies.user.userName})
-    const message = {
-        input:req.body.message,
-        date: new Date(),
-        from:userChats.owner
-    }
-
-    const hasContact = contactChats.chats.some(chat => chat.userName === userChats.owner)
-
-    if(!hasContact){
-        const newChat = {
-            userName:userChats.owner,
-            _id:userChats._id,
-        messages:[]
-    }
-
-        await contactChats.chats.push(newChat)
-        await contactChats.save()
-    }
-
-    const userChatIndex = locateContact(userChats.chats, contactChats.owner);
-    const contactChatIndex = locateContact(contactChats.chats, userChats.owner);
-
-    await contactChats.chats[contactChatIndex].messages.push(message);
-    await userChats.chats[userChatIndex].messages.push(message);
-    await contactChats.save();
-    await userChats.save();
-
-
-    res.redirect(referer);
-});
-
-
-
-
 
 app.post('/api/searchUsers', async (req, res) => {
 
@@ -196,25 +167,37 @@ app.post('/api/searchUsers', async (req, res) => {
 
 
 app.post('/api/addChat', async (req, res) => {
-    const newChat = await USER.findOne({userName: req.body.chatUserName}, 'userName');
+    const newChats = await CHATS.findOne({owner: req.body.chatUserName},);
     const userChats = await CHATS.findOne({owner:req.cookies.user.userName}) 
-    console.log(userChats)
-    const chat = {
-                userName:newChat.userName,
-                _id:newChat._id,
-            messages:[]
+
+    function roomID(){
+        const hasContact = newChats.chats.some(chat => chat.userName === userChats.owner)
+        if(!hasContact){
+            return (`${newChats.owner + userChats.owner}`)
+        }else{
+            const index = locateContact(newChats.chats, userChats.owner)
+            return newChats.chats[index].room
         }
+    };
+
+    const chat = {
+                userName:newChats.owner,
+                image:newChats.image,
+                _id:newChats._id,
+                room:roomID(),
+            messages:[]
+        };
 
     userChats.chats.push(chat)
     userChats.save().then(() => {
-        res.send(userChats)
+        res.redirect('/')
     })
 });
 
 
+//Main client display route
 app.get('*', async (req, res) => {
     try{
-        res.cookie('nothing', {nothing:'nothing'})
         res.sendFile(path.resolve(__dirname, 'client', 'build', 'index.html'));
     }catch(err){
         console.log(err.message)
@@ -222,82 +205,152 @@ app.get('*', async (req, res) => {
 });
 
 
+/*
+DISCONNECTED USER API BELOW
+*/
+
+app.post('/contact', async (req, res) => {
+    const noteInfo = await new clientNote({
+        name:req.body.fullName,
+        email:req.body.email,
+        message:req.body.message
+    });
+
+    await noteInfo.save();
+
+    res.redirect('/');
+});
+
+//No user side registeration and request handling
 app.post('/signUp', async (req, res) => {
-    try{
-        bcrypt.hash(req.body.password, 10, async (err, hash) => {
-           const newUser =  new USER({
-                userName:req.body.userName,
-                password:hash,
-                email:req.body.email,
-                adress:{
-                    country:req.body.country,
-                    city:req.body.city,
-                    street:req.body.street,
-                    zip_code:req.body.zipCode
-                }
+    // New user entering + password encryption
+    console.log(req.body);
+
+    const {
+        userName,
+        email,
+        country,
+        city,
+        street,
+        zipCode,
+        password,
+        confirm,
+    } = req.body;
+
+    try {
+        if (password !== confirm) {
+            res.status(400).send('Passwords do not match');
+            return;
+        }
+
+        if (!/^\d+$/.test(zipCode) || zipCode.length<6) {
+            res.status(400).send('Zip code must be a six digit number');
+            return;
+        }
+
+        const existingUser = await USER.findOne({ userName });
+
+        console.log(existingUser)
+
+        if (existingUser) {
+            res.status(400).send('Username already in use');
+            return;
+        }
+
+        bcrypt.hash(password, 10, async (err, hash) => {
+            if (err) {
+                console.log(err);
+                res.status(500).send('An error occurred');
+                return;
+            }
+
+            const newUser = await new USER({
+                userName,
+                password: hash,
+                email,
+                adress: {
+                    country,
+                    city,
+                    street,
+                    zip_code: zipCode,
+                },
             });
 
-            const newChat = new CHATS({
-                owner:req.body.userName,
-                chats:[]
-            })
+            const newChat = await new CHATS({
+                owner: userName,
+                chats: [],
+            });
 
-            await newChat.save()
-            await newUser.save()
-            if(err){
-                console.log(err)
-            }else{
-                res.sendFile(path.resolve(__dirname, 'client', 'build', 'index.html'));
+            newChat.save();
+            newUser.save();
+            res.cookie('user', newUser);
+            res.redirect('/uploadImage')
+        });
+    } catch (error) {
+        console.error('An error occurred:', error.message);
+        res.status(500).send('An error occurred');
+    }
+});
+
+
+//API route to sign into an existing user
+app.post('/signIn', async (req, res) => {
+    try {
+        const password = req.body.password;
+        const username = req.body.username;
+
+        if (!username || !password) {
+            res.status(400).send('Username and password are required.');
+            return;
+        }
+
+        const foundUser = await USER.findOne({ userName: username });
+
+        if (!foundUser) {
+            res.status(404).send('User not found');
+            return;
+        }
+
+        bcrypt.compare(password, foundUser.password, async (err, result) => {
+            if (result) {
+                res.cookie('user', foundUser);
+                res.sendStatus(200); // Sign-in successful
+            } else {
+                res.status(401).send('Password incorrect');
             }
         });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('An error occurred');
+    }
+});
+
+app.post('/uploadImage', async (req, res) => {
+    const user = req.cookies.user.userName
+    const newImage = req.body.myFile
+
+    try{
+        const userChat = await CHATS.findOne({owner:user});
+        //Sets a new image to the users chat document
+
+        userChat.image = newImage
+        await userChat.save()
+
+        res.status(201).json( { msg: 'New image uploaded' } )
     }catch(error){
-        if (error.name === 'MongoServerError' && error.code === 11000) {
-            // This error is a duplicate key error
-            if (error.keyPattern && error.keyPattern.userName === 1) {
-              // This error is specific to the 'userName' field
-              console.error('Duplicate userName found:', error.keyValue.userName);
-            }
-          } else {
-            console.error('An error occurred:', error.message);
-          }
+
+        res.status(409).json( { message : error.message } )
+
     }
 });
 
 
 
-
-
-app.post('/signIn', (req, res) => {
-    try{
-    const password = req.body.password;
-    const username = req.body.username;
-
-    USER.findOne({userName:username}).then((foundUser) => {
-        if(!foundUser){
-            res.send('User not found')
-        }else{
-            bcrypt.compare(password, foundUser.password, async (err, result) => {
-                if(result){
-                    res.cookie('user', foundUser)
-                    res.redirect('/')
-                }else{
-                    res.send('password incorrect')
-                }
-            });
-        }
-
-    });
-
-}catch(e){
-    console.log(e.message)
-}
+//PORTS
+server.listen(4000, () => {
+    console.log('listening to socket port')
 });
-
-
-
-
-
 
 const PORT = process.env.PORT || 5000;
 console.log('server started on port:', PORT)
-app.listen(PORT)
+app.listen(PORT);
