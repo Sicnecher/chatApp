@@ -137,22 +137,22 @@ app.get('/api/getChats', async (req, res) => {
 
 app.post('/api/searchUsers', async (req, res) => {
 
-    const result = await USER.find(
+    const result = await CHATS.find(
         {
             $and:[
                 {
-            userName:{
+            owner:{
                 $regex: req.body.userName,
                 $options: 'i'
             }
         },
         {
-            userName: {
+            owner: {
                 $ne: req.body.personalUser.userName
               }
         }
     ]
-},'userName')
+})
     .limit(6)
     .then((result) => {
         res.send(result)
@@ -167,8 +167,10 @@ app.post('/api/searchUsers', async (req, res) => {
 
 
 app.post('/api/addChat', async (req, res) => {
-    const newChats = await CHATS.findOne({owner: req.body.chatUserName},);
+    const newChats = await CHATS.findOne({owner: req.body.chatUserName});
     const userChats = await CHATS.findOne({owner:req.cookies.user.userName}) 
+    console.log(req.body.chatUserName)
+    console.log(newChats)
 
     function roomID(){
         const hasContact = newChats.chats.some(chat => chat.userName === userChats.owner)
@@ -188,10 +190,9 @@ app.post('/api/addChat', async (req, res) => {
             messages:[]
         };
 
-    userChats.chats.push(chat)
-    userChats.save().then(() => {
+   await userChats.chats.push(chat)
+   await userChats.save()
         res.redirect('/')
-    })
 });
 
 
